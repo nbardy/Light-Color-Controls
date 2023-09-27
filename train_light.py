@@ -72,7 +72,79 @@ from PIL import Image
 import requests
 from io import BytesIO
 
+## Light Ops
 
+
+## Utils functions for light generation
+def generate_points(n):
+    points = []
+    for _ in range(n):
+        x = random.uniform(0, 1)
+        magnitude = random.uniform(0, 1)
+        points.append({"x": x, "magnitude": magnitude})
+    return points
+
+
+def compute_curve_value(x, points, sigma=0.05):
+    y = torch.zeros_like(x)
+    for point in points:
+        xi = point["x"]
+        Ai = point["magnitude"]
+        y += Ai * torch.exp(-((x - xi) ** 2) / (2 * sigma**2))
+    return y
+
+
+from kornia.color.lab import rgb_to_lab, lab_to_rgb
+
+# Function to Generate Luminance Features
+# Function to Generate Luminance Features and Normalize Them
+def generate_luminance_features(img_tensor):
+    lab_img = rgb_to_lab(img_tensor)  # Bx3xHxW
+    luminance = lab_img[:, :1]  # Bx1xHxW
+
+    # Normalize Luminance to [0, 1] range
+    luminance = luminance / 100.0  # Bx1xHxW
+
+    return luminance
+
+
+def modulate_luminance_with_curve(luminance: torch.Tensor, control_points):
+    luminance_modulated = compute_curve_value(luminance, control_points)  # Bx1xHxW
+    noise = torch.randn_like(luminance)  # Bx1xHxW
+    modulated_luminance = luminance + noise * luminance_modulated  # Bx1xHxW
+
+    print(
+        f"Min and Max Luminance before modulation: {luminance.min()}, {luminance.max()}"
+    )
+    print(
+        f"Min and Max Luminance after modulation: {luminance_modulated.min()}, {luminance_modulated.max()}"
+    )
+
+    return modulated_luminance
+
+
+point_count_choices = [2, 3, 4]
+
+
+def make_condition(img_tensor, resolution):
+    luminance = generate_luminance_features(img_tensor)
+
+    point_count = random.choice(point_count_choices)
+    control_points = generate_points(point_count)
+
+    modulated_luminance = modulate_luminance_with_curve(luminance, control_points)
+
+    modulated_image = modulated_luminance.repeat(1, 3, 1, 1)  # Bx3xWx
+    modulated_image = modulated_image.squeeze(0).permute(
+        1, 2, 0
+    )  # Remove batch dimension and permute to WxHxC
+    # modulated_image = (modulated_image * 255).byte()  # Convert to 8-bit pixel values
+    # pil_image = Image.fromarray(modulated_image.cpu().numpy(), "RGB")
+
+    return modulated_image
+
+
+# Wraps LAION high res
 class CustomDataset(Dataset):
     def __init__(self, original_dataset, resolution):
         self.original_dataset = original_dataset
@@ -110,12 +182,15 @@ class CustomDataset(Dataset):
         # Apply transformations
         img_transformed = self.transform(img)  # CxHxW
 
+        cond = make_condition(img_transformed, self.resolution)
+
         return {
             "URL": img_url,
             "TEXT": sample["TEXT"],
             "WIDTH": sample["WIDTH"],
             "HEIGHT": sample["HEIGHT"],
             "IMAGE": img_transformed,  # [Change] Added IMAGE field containing the transformed image
+            "COND": cond,
         }
 
 
@@ -802,10 +877,12 @@ def main(args):
                 batch["IMAGE"] = batch["IMAGE"].cuda()
                 batch["IMAGE"] = batch["IMAGE"] * 2.0 - 1.0
                 # get sketch
-                edge = 0.5 * batch["jpg"] + 0.5
-                edge = sketch_model(edge)[-1]
-                # add random threshold and random masking
-                edge = random_threshold(edge).to(dtype=weight_dtype)
+                # edge = 0.5 * batch["jpg"] + 0.5
+                # edge = sketch_model(edge)[-1]
+                # # add random threshold and random masking
+                # edge = random_threshold(edge).to(dtype=weight_dtype)
+
+                light = batch["COND"].cuda()
 
                 # Convert images to latent space
                 if args.pretrained_vae_model_name_or_path is not None:
@@ -841,7 +918,7 @@ def main(args):
                 )
 
                 # Adapter conditioning.
-                down_block_additional_residuals = adapter(edge)
+                down_block_additional_residuals = adapter(light)
 
                 # Predict the noise residual
                 model_pred = unet(
