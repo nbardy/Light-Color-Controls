@@ -171,6 +171,7 @@ class CustomDataset(Dataset):
         # use next
         sample = next(iter(self.original_dataset))
 
+        print("======")
         print("Sample")
         print(sample)
 
