@@ -126,7 +126,7 @@ def modulate_luminance_with_curve(luminance: torch.Tensor, control_points):
 point_count_choices = [2, 3, 4]
 
 
-def make_condition(img_tensor, resolution):
+def make_condition(img_tensor):
     luminance = generate_luminance_features(img_tensor)
 
     point_count = random.choice(point_count_choices)
@@ -182,7 +182,7 @@ class CustomDataset(Dataset):
         # Apply transformations
         img_transformed = self.transform(img)  # CxHxW
 
-        cond = make_condition(img_transformed, self.resolution)
+        cond = make_condition(img_transformed)
 
         return {
             "URL": img_url,
@@ -195,7 +195,7 @@ class CustomDataset(Dataset):
 
 
 def light_dataloader(resolution=512):
-    dataset = load_dataset("laion/laion-high-resolution")
+    dataset = load_dataset("laion/laion-high-resolution", streaming=True)
     custom_dataset = CustomDataset(dataset, resolution)
     dataloader = DataLoader(custom_dataset, batch_size=4)
     return dataloader
@@ -801,7 +801,9 @@ def main(args):
     torch.cuda.empty_cache()
 
     # data
+    print("Loading data...")
     train_dataloader = light_dataloader()
+    print("Data loaded!")
     # instantiate_from_config(config.data)
     # train_dataloader = data.train_dataloader()
 
