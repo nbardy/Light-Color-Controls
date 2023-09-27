@@ -198,7 +198,7 @@ class CustomDataset(Dataset):
 
 
 def light_dataloader(resolution=512):
-    dataset = load_dataset("laion/laion-high-resolution", streaming=True)
+    dataset = load_dataset("laion/laion-high-resolution", streaming=True, split="train")
     custom_dataset = CustomDataset(dataset, resolution)
     dataloader = DataLoader(custom_dataset, batch_size=4)
     return dataloader
