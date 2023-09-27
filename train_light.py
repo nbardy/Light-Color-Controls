@@ -169,7 +169,7 @@ class CustomDataset(Dataset):
     def __getitem__(self, idx):
         # sample = self.original_dataset[idx]
         # use next
-        sample = next(self.original_dataset)
+        sample = next(iter(self.original_dataset))
 
         # Download and open image
         img_url = sample["URL"]
