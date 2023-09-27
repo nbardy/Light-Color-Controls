@@ -63,28 +63,86 @@ import shlex
 
 
 ## custom dataloder
-def light_dataloader():
+
+from torch.utils.data import DataLoader
+
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
+from PIL import Image
+import requests
+from io import BytesIO
+
+
+class CustomDataset(Dataset):
+    def __init__(self, original_dataset, resolution):
+        self.original_dataset = original_dataset
+        self.resolution = resolution
+
+        # Transformation pipeline
+        self.transform = transforms.Compose(
+            [
+                transforms.CenterCrop(
+                    min(
+                        self.original_dataset[0]["WIDTH"],
+                        self.original_dataset[0]["HEIGHT"],
+                    )
+                ),  # Assuming first image dimensions are representative
+                transforms.Resize(
+                    (self.resolution, self.resolution)
+                ),  # Output size (H, W)
+                transforms.ToTensor(),
+            ]
+        )
+
+    def __len__(self):
+        return len(self.original_dataset)
+
+    def __getitem__(self, idx):
+        sample = self.original_dataset[idx]
+
+        # Download and open image
+        img_url = sample["URL"]
+        response = requests.get(img_url)
+        img = Image.open(BytesIO(response.content)).convert(
+            "RGB"
+        )  # Convert to PIL Image
+
+        # Apply transformations
+        img_transformed = self.transform(img)  # CxHxW
+
+        return {
+            "URL": img_url,
+            "TEXT": sample["TEXT"],
+            "WIDTH": sample["WIDTH"],
+            "HEIGHT": sample["HEIGHT"],
+            "IMAGE": img_transformed,  # [Change] Added IMAGE field containing the transformed image
+        }
+
+
+def light_dataloader(resolution=512):
     dataset = load_dataset("laion/laion-high-resolution")
-    dataloader = DataLoader(dataset, batch_size=4)
+    custom_dataset = CustomDataset(dataset, resolution)
+    dataloader = DataLoader(custom_dataset, batch_size=4)
     return dataloader
 
 
 urls = {
-    'TencentARC/T2I-Adapter':[
-        'third-party-models/body_pose_model.pth', 'third-party-models/table5_pidinet.pth'
+    "TencentARC/T2I-Adapter": [
+        "third-party-models/body_pose_model.pth",
+        "third-party-models/table5_pidinet.pth",
     ]
 }
 
-if os.path.exists('checkpoints') == False:
-    os.mkdir('checkpoints')
+if os.path.exists("checkpoints") == False:
+    os.mkdir("checkpoints")
 for repo in urls:
     files = urls[repo]
     for file in files:
         url = hf_hub_url(repo, file)
-        name_ckp = url.split('/')[-1]
-        save_path = os.path.join('checkpoints',name_ckp)
+        name_ckp = url.split("/")[-1]
+        save_path = os.path.join("checkpoints", name_ckp)
         if os.path.exists(save_path) == False:
-            subprocess.run(shlex.split(f'wget {url} -O {save_path}'))
+            subprocess.run(shlex.split(f"wget {url} -O {save_path}"))
 
 
 if is_wandb_available():
@@ -94,6 +152,7 @@ if is_wandb_available():
 # check_min_version("0.20.0.dev0")
 
 logger = get_logger(__name__)
+
 
 def import_model_class_from_model_name_or_path(
     pretrained_model_name_or_path: str, revision: str, subfolder: str = "text_encoder"
@@ -116,7 +175,9 @@ def import_model_class_from_model_name_or_path(
 
 
 def parse_args(input_args=None):
-    parser = argparse.ArgumentParser(description="Simple example of a T2I-Adapter training script.")
+    parser = argparse.ArgumentParser(
+        description="Simple example of a T2I-Adapter training script."
+    )
     parser.add_argument(
         "--pretrained_model_name_or_path",
         type=str,
@@ -152,7 +213,9 @@ def parse_args(input_args=None):
         default="experiments/adapter_xl_sketch",
         help="The output directory where the model predictions and checkpoints will be written.",
     )
-    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
+    parser.add_argument(
+        "--seed", type=int, default=None, help="A seed for reproducible training."
+    )
     parser.add_argument(
         "--resolution",
         type=int,
@@ -166,16 +229,23 @@ def parse_args(input_args=None):
         "--crops_coords_top_left_h",
         type=int,
         default=0,
-        help=("Coordinate for (the height) to be included in the crop coordinate embeddings needed by SDXL UNet."),
+        help=(
+            "Coordinate for (the height) to be included in the crop coordinate embeddings needed by SDXL UNet."
+        ),
     )
     parser.add_argument(
         "--crops_coords_top_left_w",
         type=int,
         default=0,
-        help=("Coordinate for (the height) to be included in the crop coordinate embeddings needed by SDXL UNet."),
+        help=(
+            "Coordinate for (the height) to be included in the crop coordinate embeddings needed by SDXL UNet."
+        ),
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size",
+        type=int,
+        default=4,
+        help="Batch size (per device) for the training dataloader.",
     )
     parser.add_argument("--num_train_epochs", type=int, default=1)
     parser.add_argument(
@@ -223,7 +293,7 @@ def parse_args(input_args=None):
         "--config",
         type=str,
         default="configs/train/Adapter-XL-sketch.yaml",
-        help=('config to load the train model and dataset'),
+        help=("config to load the train model and dataset"),
     )
     parser.add_argument(
         "--lr_scheduler",
@@ -235,7 +305,10 @@ def parse_args(input_args=None):
         ),
     )
     parser.add_argument(
-        "--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler."
+        "--lr_warmup_steps",
+        type=int,
+        default=500,
+        help="Number of steps for the warmup in the lr scheduler.",
     )
     parser.add_argument(
         "--lr_num_cycles",
@@ -243,9 +316,16 @@ def parse_args(input_args=None):
         default=1,
         help="Number of hard resets of the lr in cosine_with_restarts scheduler.",
     )
-    parser.add_argument("--lr_power", type=float, default=1.0, help="Power factor of the polynomial scheduler.")
     parser.add_argument(
-        "--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes."
+        "--lr_power",
+        type=float,
+        default=1.0,
+        help="Power factor of the polynomial scheduler.",
+    )
+    parser.add_argument(
+        "--use_8bit_adam",
+        action="store_true",
+        help="Whether or not to use 8-bit Adam from bitsandbytes.",
     )
     parser.add_argument(
         "--dataloader_num_workers",
@@ -255,11 +335,30 @@ def parse_args(input_args=None):
             "Number of subprocesses to use for data loading. 0 means that the data will be loaded in the main process."
         ),
     )
-    parser.add_argument("--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
-    parser.add_argument("--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
-    parser.add_argument("--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use.")
-    parser.add_argument("--adam_epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
-    parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
+    parser.add_argument(
+        "--adam_beta1",
+        type=float,
+        default=0.9,
+        help="The beta1 parameter for the Adam optimizer.",
+    )
+    parser.add_argument(
+        "--adam_beta2",
+        type=float,
+        default=0.999,
+        help="The beta2 parameter for the Adam optimizer.",
+    )
+    parser.add_argument(
+        "--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use."
+    )
+    parser.add_argument(
+        "--adam_epsilon",
+        type=float,
+        default=1e-08,
+        help="Epsilon value for the Adam optimizer",
+    )
+    parser.add_argument(
+        "--max_grad_norm", default=1.0, type=float, help="Max gradient norm."
+    )
     parser.add_argument(
         "--logging_dir",
         type=str,
@@ -298,7 +397,9 @@ def parse_args(input_args=None):
         ),
     )
     parser.add_argument(
-        "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
+        "--enable_xformers_memory_efficient_attention",
+        action="store_true",
+        help="Whether or not to use xformers.",
     )
     parser.add_argument(
         "--set_grads_to_none",
@@ -342,7 +443,9 @@ def parse_args(input_args=None):
 
 
 # Adapted from pipelines.StableDiffusionXLPipeline.encode_prompt
-def encode_prompt(prompt_batch, text_encoders, tokenizers, proportion_empty_prompts, is_train=True):
+def encode_prompt(
+    prompt_batch, text_encoders, tokenizers, proportion_empty_prompts, is_train=True
+):
     prompt_embeds_list = []
 
     captions = []
@@ -383,15 +486,17 @@ def encode_prompt(prompt_batch, text_encoders, tokenizers, proportion_empty_prom
 
 
 def random_threshold(edge, low_threshold=0.3, high_threshold=0.8):
-        threshold = round(random.uniform(low_threshold, high_threshold), 1)
-        edge = edge > threshold
-        return edge
+    threshold = round(random.uniform(low_threshold, high_threshold), 1)
+    edge = edge > threshold
+    return edge
 
 
 def main(args):
     logging_dir = Path(args.output_dir, args.logging_dir)
 
-    accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
+    accelerator_project_config = ProjectConfiguration(
+        project_dir=args.output_dir, logging_dir=logging_dir
+    )
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -425,10 +530,16 @@ def main(args):
 
     # Load the tokenizers
     tokenizer_one = AutoTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision, use_fast=False
+        args.pretrained_model_name_or_path,
+        subfolder="tokenizer",
+        revision=args.revision,
+        use_fast=False,
     )
     tokenizer_two = AutoTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="tokenizer_2", revision=args.revision, use_fast=False
+        args.pretrained_model_name_or_path,
+        subfolder="tokenizer_2",
+        revision=args.revision,
+        use_fast=False,
     )
 
     # import correct text encoder classes
@@ -440,12 +551,18 @@ def main(args):
     )
 
     # Load scheduler and models
-    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+    noise_scheduler = DDPMScheduler.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="scheduler"
+    )
     text_encoder_one = text_encoder_cls_one.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
+        args.pretrained_model_name_or_path,
+        subfolder="text_encoder",
+        revision=args.revision,
     )
     text_encoder_two = text_encoder_cls_two.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder_2", revision=args.revision
+        args.pretrained_model_name_or_path,
+        subfolder="text_encoder_2",
+        revision=args.revision,
     )
     vae_path = (
         args.pretrained_model_name_or_path
@@ -470,7 +587,9 @@ def main(args):
             while len(weights) > 0:
                 weights.pop()
                 model = models[i]
-                torch.save(model.state_dict(), os.path.join(output_dir, 'model_%02d.pth'%i))
+                torch.save(
+                    model.state_dict(), os.path.join(output_dir, "model_%02d.pth" % i)
+                )
                 i -= 1
 
         accelerator.register_save_state_pre_hook(save_model_hook)
@@ -490,7 +609,9 @@ def main(args):
                 )
             unet.enable_xformers_memory_efficient_attention()
         else:
-            raise ValueError("xformers is not available. Make sure it is installed correctly")
+            raise ValueError(
+                "xformers is not available. Make sure it is installed correctly"
+            )
 
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
@@ -502,7 +623,10 @@ def main(args):
 
     if args.scale_lr:
         args.learning_rate = (
-            args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
+            args.learning_rate
+            * args.gradient_accumulation_steps
+            * args.train_batch_size
+            * accelerator.num_processes
         )
 
     # Use 8-bit Adam for lower memory usage or to fine-tune the model in 16GB GPUs
@@ -533,8 +657,10 @@ def main(args):
     )
     # load sketch model
     sketch_model = pidinet()
-    ckp = torch.load('checkpoints/table5_pidinet.pth', map_location='cpu')['state_dict']
-    sketch_model.load_state_dict({k.replace('module.', ''): v for k, v in ckp.items()}, strict=True)
+    ckp = torch.load("checkpoints/table5_pidinet.pth", map_location="cpu")["state_dict"]
+    sketch_model.load_state_dict(
+        {k.replace("module.", ""): v for k, v in ckp.items()}, strict=True
+    )
     sketch_model = sketch_model.cuda()
     for param in sketch_model.parameters():
         param.required_grad = False
@@ -559,11 +685,16 @@ def main(args):
 
     # Here, we compute not just the text embeddings but also the additional embeddings
     # needed for the SD XL UNet to operate.
-    def compute_embeddings(batch, proportion_empty_prompts, text_encoders, tokenizers, is_train=True):
+    def compute_embeddings(
+        batch, proportion_empty_prompts, text_encoders, tokenizers, is_train=True
+    ):
         original_size = (args.resolution, args.resolution)
         target_size = (args.resolution, args.resolution)
-        crops_coords_top_left = (args.crops_coords_top_left_h, args.crops_coords_top_left_w)
-        prompt_batch = batch['txt']
+        crops_coords_top_left = (
+            args.crops_coords_top_left_h,
+            args.crops_coords_top_left_w,
+        )
+        prompt_batch = batch["txt"]
 
         prompt_embeds, pooled_prompt_embeds = encode_prompt(
             prompt_batch, text_encoders, tokenizers, proportion_empty_prompts, is_train
@@ -578,9 +709,14 @@ def main(args):
         add_text_embeds = add_text_embeds.to(accelerator.device)
         add_time_ids = add_time_ids.repeat(len(prompt_batch), 1)
         add_time_ids = add_time_ids.to(accelerator.device, dtype=prompt_embeds.dtype)
-        unet_added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
+        unet_added_cond_kwargs = {
+            "text_embeds": add_text_embeds,
+            "time_ids": add_time_ids,
+        }
 
-        return {"prompt_embeds": prompt_embeds}, unet_added_cond_kwargs#, **unet_added_cond_kwargs}
+        return {
+            "prompt_embeds": prompt_embeds
+        }, unet_added_cond_kwargs  # , **unet_added_cond_kwargs}
 
     # Let's first compute all the embeddings so that we can free up the text encoders
     # from memory.
@@ -590,7 +726,7 @@ def main(args):
     torch.cuda.empty_cache()
 
     # data
-    train_dataloader = light_dataloader() 
+    train_dataloader = light_dataloader()
     # instantiate_from_config(config.data)
     # train_dataloader = data.train_dataloader()
 
@@ -631,12 +767,18 @@ def main(args):
         accelerator.init_trackers(args.tracker_project_name, config=tracker_config)
 
     # Train!
-    total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+    total_batch_size = (
+        args.train_batch_size
+        * accelerator.num_processes
+        * args.gradient_accumulation_steps
+    )
 
     logger.info("***** Running training *****")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
-    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
+    logger.info(
+        f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}"
+    )
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     global_step = 0
@@ -657,19 +799,19 @@ def main(args):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(adapter):
                 # norm input
-                batch["jpg"] = batch["jpg"].cuda()
-                batch["jpg"] = batch["jpg"]*2.-1.
+                batch["IMAGE"] = batch["IMAGE"].cuda()
+                batch["IMAGE"] = batch["IMAGE"] * 2.0 - 1.0
                 # get sketch
-                edge = 0.5 * batch['jpg'] + 0.5
+                edge = 0.5 * batch["jpg"] + 0.5
                 edge = sketch_model(edge)[-1]
                 # add random threshold and random masking
                 edge = random_threshold(edge).to(dtype=weight_dtype)
 
                 # Convert images to latent space
                 if args.pretrained_vae_model_name_or_path is not None:
-                    pixel_values = batch["jpg"].to(dtype=weight_dtype)
+                    pixel_values = batch["IMAGE"].to(dtype=weight_dtype)
                 else:
-                    pixel_values = batch["jpg"]
+                    pixel_values = batch["IMAGE"]
                 latents = vae.encode(pixel_values).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
                 if args.pretrained_vae_model_name_or_path is None:
@@ -680,8 +822,10 @@ def main(args):
                 bsz = latents.shape[0]
 
                 # Cubic sampling to sample a random timestep for each image
-                timesteps = torch.rand((bsz, ), device=latents.device)
-                timesteps = (1 - timesteps**3) * noise_scheduler.config.num_train_timesteps
+                timesteps = torch.rand((bsz,), device=latents.device)
+                timesteps = (
+                    1 - timesteps**3
+                ) * noise_scheduler.config.num_train_timesteps
                 timesteps = timesteps.long()
 
                 # Add noise to the latents according to the noise magnitude at each timestep
@@ -690,13 +834,14 @@ def main(args):
 
                 # get text embedding
                 prompt_embeds, unet_added_cond_kwargs = compute_embeddings(
-                    batch=batch,proportion_empty_prompts=0,text_encoders=text_encoders,tokenizers=tokenizers
+                    batch=batch,
+                    proportion_empty_prompts=0,
+                    text_encoders=text_encoders,
+                    tokenizers=tokenizers,
                 )
 
                 # Adapter conditioning.
-                down_block_additional_residuals = adapter(
-                    edge
-                )
+                down_block_additional_residuals = adapter(edge)
 
                 # Predict the noise residual
                 model_pred = unet(
@@ -705,7 +850,8 @@ def main(args):
                     encoder_hidden_states=prompt_embeds["prompt_embeds"],
                     added_cond_kwargs=unet_added_cond_kwargs,
                     down_block_additional_residuals=[
-                        sample.to(dtype=weight_dtype) for sample in down_block_additional_residuals
+                        sample.to(dtype=weight_dtype)
+                        for sample in down_block_additional_residuals
                     ]
                     # down_block_additional_residuals,
                 ).sample
@@ -716,7 +862,9 @@ def main(args):
                 elif noise_scheduler.config.prediction_type == "v_prediction":
                     target = noise_scheduler.get_velocity(latents, noise, timesteps)
                 else:
-                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+                    raise ValueError(
+                        f"Unknown prediction type {noise_scheduler.config.prediction_type}"
+                    )
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
                 accelerator.backward(loss)
@@ -727,7 +875,6 @@ def main(args):
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=args.set_grads_to_none)
 
-
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 progress_bar.update(1)
@@ -735,7 +882,9 @@ def main(args):
 
                 if accelerator.is_main_process:
                     if global_step % args.checkpointing_steps == 0:
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                        save_path = os.path.join(
+                            args.output_dir, f"checkpoint-{global_step}"
+                        )
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
