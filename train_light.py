@@ -171,6 +171,9 @@ class CustomDataset(Dataset):
         # use next
         sample = next(iter(self.original_dataset))
 
+        print("Sample")
+        print(sample)
+
         # Download and open image
         img_url = sample["URL"]
         response = requests.get(img_url)
