@@ -154,10 +154,7 @@ class CustomDataset(Dataset):
         self.transform = transforms.Compose(
             [
                 transforms.CenterCrop(
-                    min(
-                        self.original_dataset[0]["WIDTH"],
-                        self.original_dataset[0]["HEIGHT"],
-                    )
+                    resolution
                 ),  # Assuming first image dimensions are representative
                 transforms.Resize(
                     (self.resolution, self.resolution)
@@ -170,7 +167,9 @@ class CustomDataset(Dataset):
         return len(self.original_dataset)
 
     def __getitem__(self, idx):
-        sample = self.original_dataset[idx]
+        # sample = self.original_dataset[idx]
+        # use next
+        sample = next(self.original_dataset)
 
         # Download and open image
         img_url = sample["URL"]
