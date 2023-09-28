@@ -164,7 +164,10 @@ class CustomDataset(Dataset):
         )
 
     def __len__(self):
-        return len(self.original_dataset)
+        laion_high_res_size = 174_704_931
+
+        # formatted correctly
+        return laion_high_res_size
 
     def __getitem__(self, idx):
         # sample = self.original_dataset[idx]
