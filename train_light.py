@@ -72,7 +72,20 @@ from PIL import Image
 import requests
 from io import BytesIO
 
-## Light Ops
+## Light+Color Feature generators
+
+import torch
+import torch.nn.functional as F
+from kornia.color.lab import rgb_to_lab
+import kornia
+
+import torch
+import torch.nn.functional as F
+
+
+from datasets import concatenate_datasets
+
+from .coadapter import CoAdapter
 
 
 ## Utils functions for light generation
@@ -94,9 +107,45 @@ def compute_curve_value(x, points, sigma=0.05):
     return y
 
 
-from kornia.color.lab import rgb_to_lab, lab_to_rgb
+# Function for generating training noise, defaults to:
+# * "white" = high freq white noise(very stable, does not capture low freq well)
+# * "pyramid" = stable at the right values, covers a range of frequencies
+#
+# Sample noise that we'll add to the latents
+def get_noise_like(x, args):
+    noise_type = args.noise_type
+    discount = args.pyramid_noise_discount
 
-# Function to Generate Luminance Features
+    if noise_type == "white":
+        return torch.randn_like(x)
+    elif noise_type == "pyramid":
+        noise = pyramid_noise_like(x, discount=discount, random_multiplier=True)
+        return noise
+
+
+# From J. Whitaker Multi Resolution Noise
+#
+# https://wandb.ai/johnowhitaker/multires_noise/reports/Multi-Resolution-Noise-for-Diffusion-Model-Training--VmlldzozNjYyOTU2
+#
+# With a slight modification for defaulting to deterministic freq scaling ratios(r)
+# this better suites the use case where we want to generate these later at
+# inference time.
+def pyramid_noise_like(x, discount=0.9, random_multiplier=False):
+    b, c, w, h = x.shape  # EDIT: w and h get over-written, rename for a different variant!
+    u = nn.Upsample(size=(w, h), mode="bilinear")
+    noise = torch.randn_like(x)
+    for i in range(16):
+        if random_multiplier:
+            r = random.random() * 2 + 2  # Rather than always going 2x,
+        else:
+            r = 2
+        w, h = max(1, int(w / (r**i))), max(1, int(h / (r**i)))
+        noise += u(torch.randn(b, c, w, h).to(x)) * discount**i
+        if w == 1 or h == 1:
+            break  # Lowest resolution is 1x1
+    return noise / noise.std()  # Scaled back to roughly unit variance
+
+
 # Function to Generate Luminance Features and Normalize Them
 def generate_luminance_features(img_tensor):
     lab_img = rgb_to_lab(img_tensor)  # Bx3xHxW
@@ -108,40 +157,137 @@ def generate_luminance_features(img_tensor):
     return luminance
 
 
-def modulate_luminance_with_curve(luminance: torch.Tensor, control_points):
-    luminance_modulated = compute_curve_value(luminance, control_points)  # Bx1xHxW
-    noise = torch.randn_like(luminance)  # Bx1xHxW
-    modulated_luminance = luminance + noise * luminance_modulated  # Bx1xHxW
+def generate_color_features(img_tensor, blur_kernel_size=5):
+    # Convert to Lab color space
+    lab_img = rgb_to_lab(img_tensor)  # Bx3xHxW
 
-    print(
-        f"Min and Max Luminance before modulation: {luminance.min()}, {luminance.max()}"
-    )
-    print(
-        f"Min and Max Luminance after modulation: {luminance_modulated.min()}, {luminance_modulated.max()}"
-    )
+    # Extract color channels (a and b)
+    color_channels = lab_img[:, 1:]  # Bx2xHxW
+
+    # Normalize a and b channels
+    color_channels = (color_channels + 128.0) / 255.0
+
+    # Apply Gaussian blur to normalized color channels
+    blurred_color = F.gaussian_blur(color_channels, kernel_size=(blur_kernel_size, blur_kernel_size))
+
+    # We need a third channel so average a+b
+    # Calculate the average of the a and b channels
+    avg_color = torch.mean(blurred_color, dim=1, keepdim=True)  # Bx1xHxW
+
+    # Create a 3-channel tensor: blurred a, blurred b, and their average
+    three_channel_color = torch.cat((blurred_color, avg_color), dim=1)  # Bx3xHxW
+
+    return three_channel_color
+
+
+
+def modulate_luminance_with_curve(luminance: torch.Tensor, control_points, args):
+    luminance_mask = compute_curve_value(luminance, control_points)  # Bx1xHxW
+
+    # Options for masking
+    mask_type = args.control_mask_type
+    # White noise
+    if mask_type == "white":
+        noise = torch.randn_like(luminance)  # Bx1xHxW
+    elif mask_type == "pyramid":
+        noise = pyramid_noise_like(luminance)
+    else:
+        raise Exception("No matching")
+
+    a = luminance_mask
+
+    # Increase the obscuring of the image.
+    if args.sqrt_mask:
+        a = a * a
+
+    # Add blur
+    size = generate_blur_size()
+    kernel_size = (size, size)  # Large kernel size range
+    sigma = generate_blur_sigma()
+    sigma = (sigma, sigma)  # Large sigma range
+    luminance = kornia.filters.gaussian_blur2d(luminance, kernel_size, sigma)  # Bx1xWxH
+
+    modulated_luminance = luminance * (1 - a) + noise * a  # Bx1xHxW
 
     return modulated_luminance
 
 
 point_count_choices = [2, 3, 4]
 
+import random  # ✔️ Import required libraries
 
-def make_condition(img_tensor):
-    luminance = generate_luminance_features(img_tensor)
 
-    point_count = random.choice(point_count_choices)
-    control_points = generate_points(point_count)
+# Define some blur distributions of randomness
+# We want to learn no blur, small blur and high blur for difference ranges
+#
+# Combined with noise obstruction for different levels of information destruction
+def generate_blur_sigma():  # ⌛ Define the function
+    # Generate a random value to decide the category
+    category_prob = random.uniform(0, 1)  # [0, 1)
 
-    modulated_luminance = modulate_luminance_with_curve(luminance, control_points)
+    # Generate the sigma value based on the chosen category
+    if category_prob < 0.2:  # 20% chance
+        sigma = 0
+    elif category_prob < 0.6:  # 40% chance
+        sigma = random.uniform(0.0, 1.0) * 3.5
+        sigma = sigma**2
+    else:  # 40% chance
+        sigma = random.uniform(3.5, 35.0)
 
-    modulated_image = modulated_luminance.repeat(1, 3, 1, 1)  # Bx3xWx
-    modulated_image = modulated_image.squeeze(0).permute(
-        1, 2, 0
-    )  # Remove batch dimension and permute to WxHxC
-    # modulated_image = (modulated_image * 255).byte()  # Convert to 8-bit pixel values
-    # pil_image = Image.fromarray(modulated_image.cpu().numpy(), "RGB")
+    # Return the sigma value
+    return sigma
 
-    return modulated_image
+
+def generate_odd_number(a, b):
+    # Generate a random integer within the range [a, b]
+    num = random.randint(a, b)
+
+    # [Change] Make the number odd if it's even
+    if num % 2 == 0:
+        num += 1
+
+    # Ensure the modified number is still within the range [a, b]
+    if num > b:
+        num = a if a % 2 != 0 else a + 1
+
+    return num
+
+
+def generate_blur_size():
+    return generate_odd_number(3, 9)
+
+def make_condition(image, args, cond_type="light"):
+    # Existing setup
+    resolution = args.resolution
+    transform = transforms.Compose(
+        [transforms.Resize((resolution, resolution)), transforms.ToTensor()]
+    )  # Assume these are defined elsewhere
+    img_tensor = transform(image).unsqueeze(0)  # 1xCxWxH
+
+    if cond_type == "light":
+        feature = generate_luminance_features(img_tensor)  # Assume this is defined elsewhere
+    elif cond_type == "color":
+        feature = generate_color_features(img_tensor)
+    else:
+        raise Error("Not supported type: " + cond_type)
+
+
+    point_count = random.choice(point_count_choices)  # Assume point_count_choices is defined elsewhere
+    control_points = generate_points(point_count)  # Assume this is defined elsewhere
+
+    modulated_feature = modulate_luminance_with_curve(
+        feature, control_points, args
+    )  # Assume this is defined elsewhere
+
+    if cond_type == "light":
+        modulated_image = modulated_feature.repeat(1, 3, 1, 1)  # Bx3xWxH
+
+    modulated_image = modulated_image.squeeze(0).permute(1, 2, 0)  # WxHxC
+    modulated_image = (modulated_image * 255).byte()  # Convert to 8-bit pixel values
+
+    pil_image = Image.fromarray(modulated_image.cpu().numpy(), "RGB")  # Convert to PIL image
+
+    return pil_image
 
 
 # Wraps LAION high res
@@ -188,7 +334,8 @@ class CustomDataset(Dataset):
         # Apply transformations
         img_transformed = self.transform(img)  # CxHxW
 
-        cond = make_condition(img_transformed)
+        cond_color = make_condition(img_transformed, cond_type="color")
+        cond_light = make_condition(img_transformed, cond_type="light")
 
         return {
             "URL": img_url,
@@ -196,7 +343,8 @@ class CustomDataset(Dataset):
             "WIDTH": sample["WIDTH"],
             "HEIGHT": sample["HEIGHT"],
             "IMAGE": img_transformed,  # [Change] Added IMAGE field containing the transformed image
-            "COND": cond,
+            "COND_LIGHT": cond_light,
+            "COND_COLOR": cond_color,
         }
 
 
@@ -727,8 +875,12 @@ def main(args):
     config = OmegaConf.load(args.config)
     # Optimizer creation
     adapter_config = config.model.params.adapter_config
-    adapter = instantiate_from_config(adapter_config).cuda()
-    params_to_optimize = adapter.parameters()
+    
+    adapter_light = instantiate_from_config(adapter_config).cuda()
+    adapter_color = instantiate_from_config(adapter_config).cuda()
+    coadapter = CoAdapter()
+    
+    params_to_optimize = adapter_light.parameters() + adapter_color.parameters() + coadapter.parameters()
     optimizer = optimizer_class(
         params_to_optimize,
         lr=args.learning_rate,
@@ -890,7 +1042,8 @@ def main(args):
                 # # add random threshold and random masking
                 # edge = random_threshold(edge).to(dtype=weight_dtype)
 
-                light = batch["COND"].cuda()
+                light = batch["COND_LIGHT"].cuda()
+                color = batch["COND_COLOR"].cuda()
 
                 # Convert images to latent space
                 if args.pretrained_vae_model_name_or_path is not None:
@@ -926,7 +1079,7 @@ def main(args):
                 )
 
                 # Adapter conditioning.
-                down_block_additional_residuals = adapter(light)
+                down_block_additional_residuals = coadapter([adapter(light),  adapter(color)])
 
                 # Predict the noise residual
                 model_pred = unet(
